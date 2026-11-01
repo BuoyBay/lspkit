@@ -1,0 +1,362 @@
+' LSP 3.17 base protocol helpers. No process, socket, or event-loop ownership.
+
+Private Sub ProtocolFailure(message As String)
+    Throw New InvalidArgumentException("LSP: " + message)
+End Sub
+
+Private Function IsIntegerValue(item As JSONItem) As Boolean
+    If item = Nil Then Return False
+    If Not item.IsNumber() Then Return False
+    Dim number As Double = item.AsNumber().Value
+    If number <> number Or number < -2147483648.0 Or number > 2147483647.0 Then Return False
+    Return number = Math.Floor(number)
+End Function
+
+Private Function IsRequestId(item As JSONItem) As Boolean
+    If item = Nil Then Return False
+    Return item.IsString() Or IsIntegerValue(item)
+End Function
+
+Private Sub RequireArguments(arguments As JSONItem)
+    If arguments = Nil Then Exit Sub
+    If Not arguments.IsObject() And Not arguments.IsArray() Then ProtocolFailure("params must be an object or array")
+End Sub
+
+''' Validate one LSP JSON-RPC request, notification or response (batch arrays are unsupported).
+Public Sub ValidateEnvelope(message As JSONItem)
+    If message = Nil Then ProtocolFailure("message is required")
+    If Not message.IsObject() Then ProtocolFailure("message must be an object")
+    Dim version As JSONItem = message.Value("jsonrpc")
+    If Not version.IsString() Then ProtocolFailure("jsonrpc must be 2.0")
+    If String.Compare(version.AsString().Value, "2.0", True) <> 0 Then ProtocolFailure("jsonrpc must be 2.0")
+    If message.HasKey("method") Then
+        Dim methodValue As JSONItem = message.Value("method")
+        If Not methodValue.IsString() Then ProtocolFailure("method must be a string")
+        If message.HasKey("result") Or message.HasKey("error") Then ProtocolFailure("request cannot contain a response payload")
+        If message.HasKey("id") Then
+            If Not IsRequestId(message.Value("id")) Then ProtocolFailure("request id must be a string or signed 32-bit integer")
+        End If
+        If message.HasKey("params") Then RequireArguments(message.Value("params"))
+    Else
+        If Not message.HasKey("id") Then ProtocolFailure("response id is required")
+        Dim responseId As JSONItem = message.Value("id")
+        If Not responseId.IsNull() And Not IsRequestId(responseId) Then ProtocolFailure("invalid response id")
+        If message.HasKey("params") Then ProtocolFailure("response cannot contain params")
+        Dim hasSuccess As Boolean = message.HasKey("result")
+        Dim hasFailure As Boolean = message.HasKey("error")
+        If hasSuccess = hasFailure Then ProtocolFailure("response requires exactly one of result and error")
+        If hasSuccess And responseId.IsNull() Then ProtocolFailure("successful response id cannot be null")
+        If hasFailure Then
+            Dim failure As JSONItem = message.Value("error")
+            If Not failure.IsObject() Then ProtocolFailure("error must be an object")
+            If Not IsIntegerValue(failure.Value("code")) Then ProtocolFailure("error code must be a signed 32-bit integer")
+            If Not failure.Value("message").IsString() Then ProtocolFailure("error message must be a string")
+        End If
+    End If
+End Sub
+
+''' Pass Nil for arguments to omit params; JSON null is not valid LSP params.
+Public Function Request(requestId As JSONItem, methodName As String, arguments As JSONItem) As JSONItem
+    If Not IsRequestId(requestId) Then ProtocolFailure("request id must be a string or signed 32-bit integer")
+    RequireArguments(arguments)
+    Dim envelope As JSONItem = JSONItem.NewObject()
+    envelope.Value("jsonrpc") = "2.0"
+    envelope.Value("id") = requestId
+    envelope.Value("method") = methodName
+    If arguments <> Nil Then envelope.Value("params") = arguments
+    Return envelope
+End Function
+
+Public Function Notification(methodName As String, arguments As JSONItem) As JSONItem
+    RequireArguments(arguments)
+    Dim envelope As JSONItem = JSONItem.NewObject()
+    envelope.Value("jsonrpc") = "2.0"
+    envelope.Value("method") = methodName
+    If arguments <> Nil Then envelope.Value("params") = arguments
+    Return envelope
+End Function
+
+Public Function SuccessResponse(requestId As JSONItem, payload As JSONItem) As JSONItem
+    If Not IsRequestId(requestId) Then ProtocolFailure("successful response requires a request id")
+    Dim envelope As JSONItem = JSONItem.NewObject()
+    envelope.Value("jsonrpc") = "2.0"
+    envelope.Value("id") = requestId
+    If payload = Nil Then
+        envelope.Value("result") = JSONItem.Null()
+    Else
+        envelope.Value("result") = payload
+    End If
+    Return envelope
+End Function
+
+Public Function ErrorResponse(requestId As JSONItem, errorCode As Integer, message As String, details As JSONItem) As JSONItem
+    If requestId <> Nil Then
+        If Not requestId.IsNull() And Not IsRequestId(requestId) Then ProtocolFailure("invalid error response id")
+    End If
+    If errorCode < -2147483648 Or errorCode > 2147483647 Then ProtocolFailure("error code outside signed 32-bit range")
+    Dim errorValue As JSONItem = JSONItem.NewObject()
+    Dim numericCode As Double = errorCode
+    errorValue.Value("code") = numericCode
+    errorValue.Value("message") = message
+    If details <> Nil Then errorValue.Value("data") = details
+    Dim envelope As JSONItem = JSONItem.NewObject()
+    envelope.Value("jsonrpc") = "2.0"
+    If requestId = Nil Then
+        envelope.Value("id") = JSONItem.Null()
+    Else
+        envelope.Value("id") = requestId
+    End If
+    envelope.Value("error") = errorValue
+    Return envelope
+End Function
+
+''' UTF-8 body length is measured in bytes; the returned buffer owns header and body.
+Public Function EncodeFrame(message As JSONItem, maxBodyBytes As Integer = 8388608) As Bytes
+    If maxBodyBytes < 1 Or maxBodyBytes > 2147483647 Then ProtocolFailure("invalid body size limit")
+    ValidateEnvelope(message)
+    Dim body As Bytes = Bytes.FromString(Json.Stringify(message), Text.Encodings.UTF8)
+    If body.Count > maxBodyBytes Then ProtocolFailure("body exceeds configured limit")
+    ' Decode once to validate UTF-8 even if a caller supplied malformed runtime strings.
+    Dim validatedText As String = body.ToString(Text.Encodings.UTF8)
+    Dim frame As Bytes = Bytes.FromString("Content-Length: " + String.From(body.Count) + "\r\n\r\n", Text.Encodings.ASCII)
+    frame.Append(body)
+    Return frame
+End Function
+
+Private Function HeaderToken(character As Integer) As Boolean
+    If character >= 65 And character <= 90 Then Return True
+    If character >= 97 And character <= 122 Then Return True
+    If character >= 48 And character <= 57 Then Return True
+    Return String.Contains("!#$%&'*+-.^_`|~", String.Chr(character), True)
+End Function
+
+Private Sub CheckContentType(value As String)
+    Dim components As Array Of String = String.Split(value, ";")
+    If String.Compare(String.Trim(components(0)), "application/vscode-jsonrpc", False) <> 0 Then ProtocolFailure("unsupported content type")
+    Dim seenCharset As Boolean = False
+    For index As Integer = 1 To Array.Count(components) - 1
+        Dim parameter As String = String.Trim(components(index))
+        Dim equalsIndex As Integer = String.IndexOf(parameter, "=", 0, True)
+        If equalsIndex < 1 Then ProtocolFailure("invalid content type parameter")
+        Dim name As String = String.Trim(String.Left(parameter, equalsIndex))
+        Dim encodingName As String = String.Trim(String.Substring(parameter, equalsIndex + 1))
+        If String.Compare(name, "charset", False) <> 0 Or seenCharset Then ProtocolFailure("unsupported or duplicate content type parameter")
+        seenCharset = True
+        ' MIME parameter values may be quoted, including the charset token.
+        If String.Len(encodingName) >= 2 Then
+            If String.Left(encodingName, 1) = "\"" And String.Right(encodingName, 1) = "\"" Then
+                encodingName = String.Substring(encodingName, 1, String.Len(encodingName) - 2)
+            End If
+        End If
+        If String.Compare(encodingName, "utf-8", False) <> 0 And String.Compare(encodingName, "utf8", False) <> 0 Then ProtocolFailure("only UTF-8 is supported")
+    Next
+End Sub
+
+Private Sub CheckJSONControls(body As Bytes)
+    Dim inString As Boolean = False
+    Dim escaped As Boolean = False
+    Dim depth As Integer = 0
+    For index As Integer = 0 To body.Count - 1
+        Dim octet As Integer = body.Item(index)
+        If inString Then
+            If octet < 32 Then ProtocolFailure("unescaped control byte in JSON string")
+            If escaped Then
+                If octet = 117 And index + 4 < body.Count Then
+                    If body.Item(index + 1) = 48 And body.Item(index + 2) = 48 And body.Item(index + 3) = 48 And body.Item(index + 4) = 48 Then ProtocolFailure("JSON NUL escape is unsupported by this Buoy runtime")
+                End If
+                escaped = False
+            ElseIf octet = 92 Then
+                escaped = True
+            ElseIf octet = 34 Then
+                inString = False
+            End If
+        ElseIf octet = 34 Then
+            inString = True
+        ElseIf octet = 123 Or octet = 91 Then
+            depth += 1
+            If depth > 128 Then ProtocolFailure("JSON nesting exceeds 128 levels")
+        ElseIf octet = 125 Or octet = 93 Then
+            depth -= 1
+        End If
+    Next
+End Sub
+
+''' Incremental single-threaded decoder. A protocol failure poisons it until Reset.
+Public Class LSPFrameDecoder
+    Private Property Header As Bytes = New Bytes()
+    Private Property Body As Bytes = New Bytes()
+    Private Property ExpectedBody As Integer = -1
+    Private Property Broken As Boolean = False
+    Private Property BodyLimit As Integer
+    Private Property HeaderLimit As Integer
+    Private Property BatchLimit As Integer
+    Private Property FeedLimit As Integer
+
+    Public Sub Constructor(maxBodyBytes As Integer = 8388608, maxHeaderBytes As Integer = 8192, maxMessagesPerFeed As Integer = 256, maxFeedBytes As Integer = 67108864)
+        If maxBodyBytes < 1 Or maxBodyBytes > 2147483647 Then ProtocolFailure("invalid body limit")
+        If maxHeaderBytes < 4 Or maxHeaderBytes > 2147483647 Then ProtocolFailure("invalid header limit")
+        If maxMessagesPerFeed < 1 Or maxMessagesPerFeed > 2147483647 Then ProtocolFailure("invalid message count limit")
+        If maxFeedBytes < 1 Or maxFeedBytes > 2147483647 Then ProtocolFailure("invalid feed limit")
+        Me.BodyLimit = maxBodyBytes
+        Me.HeaderLimit = maxHeaderBytes
+        Me.BatchLimit = maxMessagesPerFeed
+        Me.FeedLimit = maxFeedBytes
+    End Sub
+
+    Public Property IsFailed As Boolean
+        Get
+            Return Me.Broken
+        End Get
+    End Property
+
+    Public Property HasPendingData As Boolean
+        Get
+            Return Me.Header.Count > 0 Or Me.ExpectedBody >= 0
+        End Get
+    End Property
+
+    Public Sub Reset()
+        Me.Header = New Bytes()
+        Me.Body = New Bytes()
+        Me.ExpectedBody = -1
+        Me.Broken = False
+    End Sub
+
+    Private Sub ParseHeader()
+        Dim allText As String = Me.Header.ToString(Text.Encodings.ASCII)
+        Dim headerText As String = String.Left(allText, String.Len(allText) - 4)
+        Dim lines As Array Of String = String.Split(headerText, "\r\n")
+        Dim seen As New Set Of String()
+        Dim expected As Integer = -1
+        For Each line As String In lines
+            Dim colonIndex As Integer = String.IndexOf(line, ":", 0, True)
+            If colonIndex < 1 Then ProtocolFailure("malformed header line")
+            Dim name As String = String.Left(line, colonIndex)
+            For Each character As String In String.Chars(name)
+                If Not HeaderToken(String.Asc(character)) Then ProtocolFailure("invalid header name")
+            Next
+            name = String.LCase(name)
+            If seen.Contains(name) Then ProtocolFailure("duplicate header: " + name)
+            seen.Add(name)
+            Dim value As String = String.Trim(String.Substring(line, colonIndex + 1))
+            If name = "content-length" Then
+                If value = "" Then ProtocolFailure("empty Content-Length")
+                expected = 0
+                For Each digit As String In String.Chars(value)
+                    Dim code As Integer = String.Asc(digit)
+                    If code < 48 Or code > 57 Then ProtocolFailure("Content-Length must contain only decimal digits")
+                    Dim nextDigit As Integer = code - 48
+                    If expected > (Me.BodyLimit - nextDigit) \ 10 Then ProtocolFailure("body exceeds configured limit")
+                    expected = expected * 10 + nextDigit
+                    If expected > Me.BodyLimit Then ProtocolFailure("body exceeds configured limit")
+                Next
+            ElseIf name = "content-type" Then
+                CheckContentType(value)
+            End If
+        Next
+        If expected < 0 Then ProtocolFailure("Content-Length is required")
+        Me.ExpectedBody = expected
+        Me.Header = New Bytes()
+        If expected = 0 Then ProtocolFailure("empty JSON body")
+    End Sub
+
+    ''' Returns completed validated messages in wire order; unfinished bytes remain owned by the decoder.
+    Public Function Feed(chunk As Bytes) As Array Of JSONItem
+        If Me.Broken Then ProtocolFailure("decoder failed; Reset or replace it before reuse")
+        Dim messages(0) As JSONItem
+        Try
+            If chunk = Nil Then ProtocolFailure("chunk is required")
+            If chunk.Count > Me.FeedLimit Then ProtocolFailure("feed exceeds configured limit")
+            For index As Integer = 0 To chunk.Count - 1
+                Dim octet As Integer = chunk.Item(index)
+                If Me.ExpectedBody < 0 Then
+                    If Me.Header.Count >= Me.HeaderLimit Then ProtocolFailure("header exceeds configured limit")
+                    If octet <> 9 And octet <> 10 And octet <> 13 And (octet < 32 Or octet > 126) Then ProtocolFailure("header must be ASCII text")
+                    Dim priorCount As Integer = Me.Header.Count
+                    If octet = 10 Then
+                        If priorCount = 0 Then ProtocolFailure("bare LF in header")
+                        If Me.Header.Item(priorCount - 1) <> 13 Then ProtocolFailure("bare LF in header")
+                    ElseIf priorCount > 0 Then
+                        If Me.Header.Item(priorCount - 1) = 13 Then ProtocolFailure("bare CR in header")
+                    End If
+                    Me.Header.Append(octet)
+                    Dim count As Integer = Me.Header.Count
+                    If count >= 4 Then
+                        If Me.Header.Item(count - 4) = 13 And Me.Header.Item(count - 3) = 10 And Me.Header.Item(count - 2) = 13 And Me.Header.Item(count - 1) = 10 Then Me.ParseHeader()
+                    End If
+                Else
+                    If octet < 32 And octet <> 9 And octet <> 10 And octet <> 13 Then ProtocolFailure("invalid control byte in JSON body")
+                    Me.Body.Append(octet)
+                    If Me.Body.Count = Me.ExpectedBody Then
+                        If Array.Count(messages) >= Me.BatchLimit Then ProtocolFailure("too many messages in one feed")
+                        CheckJSONControls(Me.Body)
+                        Dim bodyText As String = Me.Body.ToString(Text.Encodings.UTF8)
+                        Dim message As JSONItem = Json.Parse(bodyText)
+                        ValidateEnvelope(message)
+                        Array.Append(messages, message)
+                        Me.Body = New Bytes()
+                        Me.ExpectedBody = -1
+                    End If
+                End If
+            Next
+        Catch fault As Exception
+            Me.Broken = True
+            Throw fault
+        End Try
+        Return messages
+    End Function
+
+    ''' Signal transport EOF; an unfinished header/body is a protocol error.
+    Public Sub Finish()
+        If Me.Broken Then ProtocolFailure("decoder failed")
+        If Me.HasPendingData Then
+            Me.Broken = True
+            ProtocolFailure("truncated message at end of stream")
+        End If
+    End Sub
+End Class
+
+''' Correlates out-of-order responses without conflating numeric and string IDs.
+Public Class LSPRequestTracker
+    Private Property Pending As Map Of String, String = New Map Of String, String()
+    Private Property Limit As Integer
+
+    Public Sub Constructor(maxPending As Integer = 1024)
+        If maxPending < 1 Then ProtocolFailure("pending request limit must be positive")
+        Me.Limit = maxPending
+    End Sub
+
+    Public Property PendingCount As Integer
+        Get
+            Return Me.Pending.Count()
+        End Get
+    End Property
+
+    Public Sub Track(message As JSONItem)
+        ValidateEnvelope(message)
+        If Not message.HasKey("method") Or Not message.HasKey("id") Then ProtocolFailure("only requests can be tracked")
+        Dim key As String = Json.Stringify(message.Value("id"))
+        If Me.Pending.ContainsKey(key) Then ProtocolFailure("request id is already pending")
+        If Me.Pending.Count() >= Me.Limit Then ProtocolFailure("too many pending requests")
+        Me.Pending.Set(key, message.Value("method").AsString().Value)
+    End Sub
+
+    Public Function Complete(message As JSONItem) As String
+        ValidateEnvelope(message)
+        If message.HasKey("method") Then ProtocolFailure("expected a response")
+        Dim key As String = Json.Stringify(message.Value("id"))
+        Dim methodName As Optional Of String = Me.Pending.Get(key)
+        If Not methodName.HasValue Then ProtocolFailure("response id is not pending")
+        Me.Pending.Remove(key)
+        Return methodName.Value
+    End Function
+
+    ''' Removes local correlation state only; send $/cancelRequest separately when needed.
+    Public Function Forget(requestId As JSONItem) As Boolean
+        If Not IsRequestId(requestId) Then ProtocolFailure("invalid request id")
+        Dim key As String = Json.Stringify(requestId)
+        Dim existed As Boolean = Me.Pending.ContainsKey(key)
+        Me.Pending.Remove(key)
+        Return existed
+    End Function
+End Class

@@ -1,0 +1,25 @@
+Import lspkit
+
+Sub Main()
+    Dim capabilities As JSONItem = JSONItem.NewObject()
+    Dim parameters As JSONItem = JSONItem.NewObject()
+    parameters.Value("processId") = JSONItem.Null()
+    parameters.Value("rootUri") = JSONItem.Null()
+    parameters.Value("capabilities") = capabilities
+    Dim initialize As JSONItem = Request(JSONItem.From(1.0), "initialize", parameters)
+    Dim requests As New LSPRequestTracker()
+    requests.Track(initialize)
+    Dim wire As Bytes = EncodeFrame(initialize)
+    Print "Write these bytes to your LSP transport:"
+    Print wire.ToString(Text.Encodings.UTF8)
+
+    ' Simulate an incoming response; Feed also accepts arbitrary fragmented chunks.
+    Dim responsePayload As JSONItem = JSONItem.NewObject()
+    responsePayload.Value("capabilities") = JSONItem.NewObject()
+    Dim decoder As New LSPFrameDecoder()
+    Dim received As Array Of JSONItem = decoder.Feed(EncodeFrame(SuccessResponse(JSONItem.From(1.0), responsePayload)))
+    For Each message As JSONItem In received
+        Print "Response to: " + requests.Complete(message)
+    Next
+    decoder.Finish()
+End Sub
