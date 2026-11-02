@@ -2,5 +2,5 @@
   "schema": 1,
   "name": "lspkit",
   "version": "0.1.0",
-  "description": "LSP JSON-RPC framing and request correlation"
+  "description": "LSP JSON-RPC framing"
 }
