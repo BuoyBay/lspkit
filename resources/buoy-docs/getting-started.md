@@ -15,7 +15,7 @@ Place `lspkit-0.1.0.buipkg` in `packages/` and import `lspkit`.
 
 The example uses an in-memory transport round trip. A real client would write the encoded request to its transport and feed arbitrary incoming byte fragments to the decoder.
 
-```buoy
+```basic
 Import lspkit
 
 Sub Main()

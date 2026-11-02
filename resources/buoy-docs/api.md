@@ -33,7 +33,6 @@ Responses require exactly one of result/error. A successful response cannot have
 
 [Getting started](getting-started.md) · [Package overview](index.md)
 
-
 [Full typed API: properties, parameters, defaults, and returns](typed-api.md)
 
 A server may still respond after cancellation. Keep the request tracked until its response arrives when possible. After `Forget`, a late response is unknown and `Complete` rejects it without changing other pending requests; the caller must handle that response. Avoid reusing a forgotten ID while its old response can still arrive, because correlation uses only the ID and cannot distinguish the old request from a new one.

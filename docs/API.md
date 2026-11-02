@@ -80,9 +80,3 @@ Objects are confined to one thread unless access is externally synchronized.
 The application remains responsible for transport backpressure, server lifecycle,
 timeouts, method-specific schemas and response dispatch. This release does not
 validate every LSP method payload or provide a full language-server client.
-
-## Verification
-
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-

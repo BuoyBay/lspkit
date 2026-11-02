@@ -1,6 +1,6 @@
 # Frame and correlate LSP JSON-RPC messages
 
-Pure Buoy building blocks for an IDE's language-server connection: byte framing,
+Source-only building blocks for an IDE's language-server connection: byte framing,
 JSON-RPC envelopes, and bounded request correlation. `Import lspkit` after placing
 `lspkit-0.1.0.buipkg` in the consumer project's `packages/` directory.
 
@@ -25,7 +25,7 @@ consumer project for reproducible installs.
 
 ## Example
 
-```buoy
+```basic
 Import lspkit
 
 Sub Main()
@@ -67,7 +67,6 @@ On your own machine, install Buoy and run:
 buoy ai init --both
 ```
 
-The generated agent files and editor settings stay local and are ignored by Git.
 
 ## Contributing
 
