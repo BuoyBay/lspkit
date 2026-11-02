@@ -1,4 +1,4 @@
-# Frame and correlate LSP JSON-RPC messages
+# LSP JSON-RPC framing and request correlation
 
 Source-only building blocks for an IDE's language-server connection: byte framing,
 JSON-RPC envelopes, and bounded request correlation. `Import lspkit` after placing

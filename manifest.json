@@ -2,5 +2,5 @@
   "schema": 1,
   "name": "lspkit",
   "version": "0.1.0",
-  "description": "Bounded LSP Content-Length framing, JSON-RPC envelopes and request correlation for IDE byte-stream transports"
+  "description": "LSP JSON-RPC framing and request correlation"
 }
